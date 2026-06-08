@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -34,40 +35,76 @@ from pathlib import Path
 WEIGHTS = ["yolov8n.pt", "mobile_sam.pt"]
 
 
+# Packages not needed at runtime inside the pack (slims it down a bit).
+_SKIP_DIRS = {"pip", "setuptools", "wheel", "pkg_resources", "_distutils_hack",
+              "__pycache__"}
+
+
 def run(cmd: list[str]) -> None:
-    print("+", " ".join(cmd), flush=True)
+    print("+", " ".join(str(c) for c in cmd), flush=True)
     subprocess.check_call(cmd)
 
 
-def pip_install_libs(libs: Path, cpu_only: bool) -> None:
-    libs.mkdir(parents=True, exist_ok=True)
-    base = [sys.executable, "-m", "pip", "install", "--no-cache-dir",
-            "--target", str(libs), "--upgrade"]
+def _venv_python(venv: Path) -> Path:
+    return venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def _venv_site_packages(venv: Path) -> Path:
+    if os.name == "nt":
+        return venv / "Lib" / "site-packages"
+    libdir = venv / "lib"
+    pyX = next(libdir.glob("python*"))
+    return pyX / "site-packages"
+
+
+def build_libs(out: Path, cpu_only: bool) -> Path:
+    """Create a venv, install the AI stack into it, and copy its site-packages
+    into <out>/libs. A real venv avoids all `pip --target` quirks and ensures
+    every dependency is present in the pack.
+    """
+    venv = out / "_venv"
+    print(f"Creating build venv at {venv} ...", flush=True)
+    run([sys.executable, "-m", "venv", str(venv)])
+    vpy = _venv_python(venv)
+    run([str(vpy), "-m", "pip", "install", "--upgrade", "pip", "wheel"])
+
     if cpu_only:
-        # torch + torchvision come from the CPU wheel index (that index also
-        # hosts their own dependencies). ultralytics and its deps come from
-        # PyPI, so it is installed in a second pass.
-        run(base + ["--index-url", "https://download.pytorch.org/whl/cpu",
-                    "torch", "torchvision"])
-        # Keep the CPU index as an extra so a re-resolved torch stays CPU.
-        run(base + ["--extra-index-url", "https://download.pytorch.org/whl/cpu",
-                    "ultralytics"])
+        # Official PyTorch CPU index (also hosts torch's own dependencies).
+        run([str(vpy), "-m", "pip", "install", "--no-cache-dir",
+             "--index-url", "https://download.pytorch.org/whl/cpu",
+             "torch", "torchvision"])
+        # ultralytics + its deps from PyPI; keep CPU index as a fallback.
+        run([str(vpy), "-m", "pip", "install", "--no-cache-dir",
+             "--extra-index-url", "https://download.pytorch.org/whl/cpu",
+             "ultralytics"])
     else:
-        run(base + ["torch", "torchvision", "ultralytics"])
+        run([str(vpy), "-m", "pip", "install", "--no-cache-dir",
+             "torch", "torchvision", "ultralytics"])
+
+    site = _venv_site_packages(venv)
+    libs = out / "libs"
+    print(f"Copying {site} -> {libs} ...", flush=True)
+    libs.mkdir(parents=True, exist_ok=True)
+    for item in site.iterdir():
+        if item.name in _SKIP_DIRS or item.name.endswith(".dist-info") and \
+                item.name.split("-")[0] in _SKIP_DIRS:
+            continue
+        dest = libs / item.name
+        if item.is_dir():
+            shutil.copytree(item, dest,
+                            ignore=shutil.ignore_patterns("__pycache__"))
+        else:
+            shutil.copy2(item, dest)
+    return vpy  # used to download weights from the same environment
 
 
-def fetch_weights(libs: Path, models: Path) -> None:
-    """Download the model weights into models/ using the pack's own libs.
+def fetch_weights(vpy: Path, models: Path) -> None:
+    """Download model weights into models/ using the build venv's interpreter.
 
-    Runs in a *separate* interpreter with PYTHONPATH=libs (rather than importing
-    the freshly --target-installed torch into this build process, which is
-    unreliable on Windows). A download failure is a warning, not a build error:
-    the app downloads any missing weights on first online use.
+    A download failure is a warning, not a build error: the app downloads any
+    missing weights on first online use.
     """
     models.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(libs) + os.pathsep + env.get("PYTHONPATH", "")
-    # Download each weight independently so one failure doesn't lose the other.
     code = (
         "from ultralytics import YOLO, SAM\n"
         "for ctor, name in [(YOLO,'yolov8n.pt'), (SAM,'mobile_sam.pt')]:\n"
@@ -76,15 +113,12 @@ def fetch_weights(libs: Path, models: Path) -> None:
         "    except Exception as e:\n"
         "        print('FAILED', name, e)\n"
     )
-    print("Fetching model weights in a subprocess...", flush=True)
-    # Not check_call: a partial/failed download must not fail the whole build.
-    subprocess.call([sys.executable, "-c", code], cwd=str(models), env=env)
-
-    # Collect whatever was downloaded (ultralytics may place files in cwd).
+    print("Fetching model weights ...", flush=True)
+    # cwd=models so ultralytics downloads the .pt files directly into it.
+    subprocess.call([str(vpy), "-c", code], cwd=str(models))
     for name in WEIGHTS:
         if not (models / name).exists():
-            found = next(Path(str(models)).rglob(name), None) \
-                or next(Path.cwd().rglob(name), None)
+            found = next(Path.cwd().rglob(name), None)
             if found and found.resolve() != (models / name).resolve():
                 shutil.move(str(found), str(models / name))
     have = [n for n in WEIGHTS if (models / n).exists()]
@@ -110,7 +144,8 @@ def make_zip(out: Path, version: str) -> Path:
     print(f"Zipping -> {zip_path}", flush=True)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for f in out.rglob("*"):
-            if f.is_file():
+            # Never include the throwaway build venv in the archive.
+            if f.is_file() and "_venv" not in f.relative_to(out.parent).parts:
                 z.write(f, f.relative_to(out.parent))
     return zip_path
 
@@ -124,13 +159,19 @@ def main() -> None:
     ap.add_argument("--no-zip", action="store_true")
     args = ap.parse_args()
 
+    print(f"Building AI extension pack: python "
+          f"{sys.version_info.major}.{sys.version_info.minor} on "
+          f"{sysconfig.get_platform()} (cpu_only={args.cpu})", flush=True)
+
     out = Path(args.out).resolve()
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
 
-    pip_install_libs(out / "libs", cpu_only=args.cpu)
-    fetch_weights(out / "libs", out / "models")
+    vpy = build_libs(out, cpu_only=args.cpu)
+    fetch_weights(vpy, out / "models")
+    # Remove the throwaway build venv before packaging.
+    shutil.rmtree(out / "_venv", ignore_errors=True)
     write_manifest(out, args.version)
     print(f"Pack built at {out}")
     if not args.no_zip:
