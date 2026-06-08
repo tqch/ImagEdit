@@ -1,0 +1,15 @@
+# Core GUI + image processing
+PyQt6>=6.6
+numpy>=1.24
+opencv-python>=4.8
+Pillow>=10.0
+
+# AI human segmentation (YOLO detection + SAM masks).
+# The app runs without these; AI auto-detect is disabled until installed.
+ultralytics>=8.1
+
+# PyTorch backend for the AI models. On Apple Silicon, recent torch versions
+# include Metal (MPS) GPU support out of the box (pip wheels). Listed
+# explicitly so the GPU/CPU toggle works reliably.
+torch>=2.2
+torchvision>=0.17

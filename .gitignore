@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.conda/
+
+# Build / packaging output
+build/
+dist/
+*.spec.bak
+*.manifest
+
+# PyInstaller / Inno output
+*.exe
+*.zip
+*.7z
+
+# AI extension pack (built artifacts, never committed)
+ai-extension/
+*-AI-Extension-*.zip
+
+# Model weights downloaded at runtime (the bundled YuNet .onnx IS committed)
+*.pt
+yolov8*.pt
+mobile_sam.pt
+sam_*.pt
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# App runtime config
+config.json

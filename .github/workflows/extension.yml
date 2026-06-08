@@ -1,0 +1,59 @@
+name: Build AI extension pack
+
+# Builds the optional AI extension pack (torch + ultralytics + weights) that
+# lets the lite Windows app run YOLO+SAM people segmentation. The pack is
+# Python/OS specific, so it is built on the same windows-latest / Python 3.11
+# as the app and attached to the matching GitHub Release.
+#
+# Trigger: pushing a version tag, or manually (workflow_dispatch).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      cpu_only:
+        description: "Build CPU-only torch (smaller pack)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-pack:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # MUST match the app/exe Python
+
+      - name: Determine version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0.dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build extension pack (CPU torch)
+        run: >
+          python packaging/build_extension.py
+          --version ${{ steps.ver.outputs.version }}
+          --out build/ai-extension --cpu
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: imagedit-ai-extension
+          path: build/ImagEdit-AI-Extension-*.zip
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/ImagEdit-AI-Extension-*.zip

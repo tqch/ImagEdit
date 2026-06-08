@@ -1,0 +1,26 @@
+# Conda environment for ImagEdit.
+#
+# Create:   conda env create -f environment.yml
+# Update:   conda env update -f environment.yml --prune
+# Activate: conda activate imagedit
+# Run:      python run.py
+#
+# Notes for Apple Silicon (MacBook Pro): the pip wheels for torch/torchvision
+# ship with Metal (MPS) GPU support, so no extra CUDA packages are needed.
+name: imagedit
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip>=23
+  # Core image stack via conda (well-supported on osx-arm64).
+  - numpy>=1.24
+  - pillow>=10.0
+  - opencv>=4.8
+  - pip:
+      # GUI
+      - PyQt6>=6.6
+      # AI segmentation backend
+      - torch>=2.2
+      - torchvision>=0.17
+      - ultralytics>=8.1
