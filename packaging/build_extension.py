@@ -41,30 +41,55 @@ def run(cmd: list[str]) -> None:
 
 def pip_install_libs(libs: Path, cpu_only: bool) -> None:
     libs.mkdir(parents=True, exist_ok=True)
-    pkgs = ["torch", "torchvision", "ultralytics"]
-    cmd = [sys.executable, "-m", "pip", "install", "--target", str(libs)]
+    base = [sys.executable, "-m", "pip", "install", "--no-cache-dir",
+            "--target", str(libs), "--upgrade"]
     if cpu_only:
-        # CPU wheels keep the pack much smaller; people segmentation still runs.
-        cmd += ["--index-url", "https://download.pytorch.org/whl/cpu",
-                "torch", "torchvision"]
-        run(cmd)
-        run([sys.executable, "-m", "pip", "install", "--target", str(libs),
-             "ultralytics"])
+        # torch + torchvision come from the CPU wheel index (that index also
+        # hosts their own dependencies). ultralytics and its deps come from
+        # PyPI, so it is installed in a second pass.
+        run(base + ["--index-url", "https://download.pytorch.org/whl/cpu",
+                    "torch", "torchvision"])
+        # Keep the CPU index as an extra so a re-resolved torch stays CPU.
+        run(base + ["--extra-index-url", "https://download.pytorch.org/whl/cpu",
+                    "ultralytics"])
     else:
-        run(cmd + pkgs)
+        run(base + ["torch", "torchvision", "ultralytics"])
 
 
-def fetch_weights(models: Path) -> None:
+def fetch_weights(libs: Path, models: Path) -> None:
+    """Download the model weights into models/ using the pack's own libs.
+
+    Runs in a *separate* interpreter with PYTHONPATH=libs (rather than importing
+    the freshly --target-installed torch into this build process, which is
+    unreliable on Windows). A download failure is a warning, not a build error:
+    the app downloads any missing weights on first online use.
+    """
     models.mkdir(parents=True, exist_ok=True)
-    # Use ultralytics to download into models/, regardless of where it installed.
-    sys.path.insert(0, str(models.parent / "libs"))
-    from ultralytics import YOLO, SAM  # noqa: E402
-    for name, ctor in [("yolov8n.pt", YOLO), ("mobile_sam.pt", SAM)]:
-        print(f"Fetching {name}...", flush=True)
-        ctor(name)  # downloads to CWD
-        src = Path.cwd() / name
-        if src.exists():
-            shutil.move(str(src), str(models / name))
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(libs) + os.pathsep + env.get("PYTHONPATH", "")
+    # Download each weight independently so one failure doesn't lose the other.
+    code = (
+        "from ultralytics import YOLO, SAM\n"
+        "for ctor, name in [(YOLO,'yolov8n.pt'), (SAM,'mobile_sam.pt')]:\n"
+        "    try:\n"
+        "        ctor(name); print('ok', name)\n"
+        "    except Exception as e:\n"
+        "        print('FAILED', name, e)\n"
+    )
+    print("Fetching model weights in a subprocess...", flush=True)
+    # Not check_call: a partial/failed download must not fail the whole build.
+    subprocess.call([sys.executable, "-c", code], cwd=str(models), env=env)
+
+    # Collect whatever was downloaded (ultralytics may place files in cwd).
+    for name in WEIGHTS:
+        if not (models / name).exists():
+            found = next(Path(str(models)).rglob(name), None) \
+                or next(Path.cwd().rglob(name), None)
+            if found and found.resolve() != (models / name).resolve():
+                shutil.move(str(found), str(models / name))
+    have = [n for n in WEIGHTS if (models / n).exists()]
+    print(f"Weights present in pack: {have or 'none (download on first use)'}",
+          flush=True)
 
 
 def write_manifest(out: Path, version: str) -> None:
@@ -105,7 +130,7 @@ def main() -> None:
     out.mkdir(parents=True)
 
     pip_install_libs(out / "libs", cpu_only=args.cpu)
-    fetch_weights(out / "models")
+    fetch_weights(out / "libs", out / "models")
     write_manifest(out, args.version)
     print(f"Pack built at {out}")
     if not args.no_zip:

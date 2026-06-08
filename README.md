@@ -145,9 +145,11 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-`release.yml` freezes the app (PyInstaller) and builds the installer (Inno
-Setup); `extension.yml` builds the optional AI pack. Use each workflow's **Run
-workflow** button to test without tagging. To build locally on Windows:
+A single workflow (`release.yml`) runs three jobs: **windows-app** (PyInstaller
+exe + Inno Setup installer + portable zip), **ai-extension** (the optional AI
+pack), and **release** — the only job that touches the GitHub Release, so the
+two builders never race. Use the **Run workflow** button to test without
+tagging. To build locally on Windows:
 
 ```powershell
 pip install PyQt6 numpy opencv-python Pillow pyinstaller

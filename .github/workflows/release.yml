@@ -1,9 +1,14 @@
-name: Release (Windows installer)
+name: Release
 
-# Builds the Windows exe + installer and attaches both to a GitHub Release.
-# Trigger by pushing a version tag:
-#   git tag v0.1.0 && git push origin v0.1.0
-# (workflow_dispatch lets you test the build without releasing)
+# One workflow per tag:
+#   * windows-app   -> builds the exe, installer, and portable zip
+#   * ai-extension  -> builds the optional AI extension pack
+#   * release       -> the ONLY job that touches the GitHub Release; it gathers
+#                      every artifact and uploads them in a single step, so the
+#                      two builders never race to create/update the release.
+#
+# Trigger by pushing a version tag (git tag v0.1.0 && git push origin v0.1.0),
+# or run manually (workflow_dispatch) to test the builds without releasing.
 
 on:
   push:
@@ -14,30 +19,12 @@ permissions:
   contents: write
 
 jobs:
-  windows-build:
-    runs-on: windows-latest
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies (lite - no torch/ultralytics)
-        run: |
-          python -m pip install --upgrade pip
-          pip install PyQt6 numpy opencv-python Pillow pyinstaller
-
-      - name: Build executable (PyInstaller)
-        run: pyinstaller packaging/imagedit.spec --noconfirm
-
-      - name: Smoke test - frozen app imports
-        run: |
-          if (-not (Test-Path "dist/ImagEdit/ImagEdit.exe")) { exit 1 }
-          if (-not (Test-Path "dist/ImagEdit/_internal/imagedit/assets/icon.png")) { exit 1 }
-
-      - name: Determine version from tag
-        id: ver
+      - id: v
         shell: bash
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
@@ -46,28 +33,89 @@ jobs:
             echo "version=0.0.0.dev" >> "$GITHUB_OUTPUT"
           fi
 
+  windows-app:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build dependencies (lite - no torch/ultralytics)
+        run: |
+          python -m pip install --upgrade pip
+          pip install PyQt6 numpy opencv-python Pillow pyinstaller
+
+      - name: Build executable (PyInstaller)
+        run: pyinstaller packaging/imagedit.spec --noconfirm
+
+      - name: Smoke test - frozen layout
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/ImagEdit/ImagEdit.exe")) { exit 1 }
+          if (-not (Test-Path "dist/ImagEdit/_internal/imagedit/assets/icon.png")) { exit 1 }
+
+      - name: Ensure Inno Setup is available
+        run: choco install innosetup -y --no-progress
+
       - name: Build installer (Inno Setup)
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
-            /DMyAppVersion=${{ steps.ver.outputs.version }} `
+            /DMyAppVersion=${{ needs.version.outputs.version }} `
             packaging\installer.iss
 
       - name: Zip portable build
-        run: Compress-Archive -Path dist/ImagEdit -DestinationPath dist/ImagEdit-${{ steps.ver.outputs.version }}-windows-portable.zip
+        run: Compress-Archive -Path dist/ImagEdit -DestinationPath dist/ImagEdit-${{ needs.version.outputs.version }}-windows-portable.zip
 
-      - name: Upload build artifacts
+      - name: Upload app artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: imagedit-windows
+          name: windows-app
           path: |
             dist/ImagEdit-Setup-*.exe
             dist/*-windows-portable.zip
+          if-no-files-found: error
 
-      - name: Attach to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+  ai-extension:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # MUST match the app/exe Python
+
+      - name: Build AI extension pack (CPU torch)
+        run: >
+          python packaging/build_extension.py
+          --version ${{ needs.version.outputs.version }}
+          --out build/ai-extension --cpu
+
+      - name: Upload extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-extension
+          path: build/ImagEdit-AI-Extension-*.zip
+          if-no-files-found: error
+
+  release:
+    needs: [version, windows-app, ai-extension]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts
+
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/ImagEdit-Setup-*.exe
-            dist/*-windows-portable.zip
+          files: artifacts/*
           generate_release_notes: true
+          fail_on_unmatched_files: true
